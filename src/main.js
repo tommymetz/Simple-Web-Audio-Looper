@@ -42,6 +42,8 @@ let masterGain = null;
 let recordedChunks = [];
 /** set by stopRecording(), read once the worklet acknowledges it has stopped */
 let pendingStopApplyEndAutoCrop = true;
+/** true from stopRecording() until the worklet acknowledges — guards against a second overlapping stop during the grace delay */
+let stopPending = false;
 /** @type {Float32Array | null} full normalized recording, fixed per take — crop is always measured from these true edges */
 let originalBuffer = null;
 /** @type {Float32Array | null} originalBuffer with the committed crop applied — source of truth for future DSP and the main waveform view */
@@ -395,17 +397,21 @@ async function startRecording() {
 }
 
 /**
- * Tells the worklet to stop and finalizes once it acknowledges — rather than
- * finalizing immediately, which could race a backlog of already-recorded
- * chunks still sitting in the message queue and silently drop them.
+ * Tells the worklet to stop immediately and finalizes once it acknowledges —
+ * rather than finalizing right away, which could race a backlog of
+ * already-recorded chunks still sitting in the message queue and silently
+ * drop them. The round trip is a same-thread-tick message hop, not a wait.
  * applyEndAutoCrop is true for a tap-to-stop, false for a held-then-released stop.
  */
 function stopRecording(applyEndAutoCrop) {
+  if (stopPending) return;
+  stopPending = true;
   pendingStopApplyEndAutoCrop = applyEndAutoCrop;
   workletNode.port.postMessage('stop');
 }
 
 function handleWorkletStopped() {
+  stopPending = false;
   const applyEndAutoCrop = pendingStopApplyEndAutoCrop;
 
   originalBuffer = concatChunks(recordedChunks);
