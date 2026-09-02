@@ -60,11 +60,24 @@ button {
   border: 1px solid #888;
   cursor: pointer;
   min-width: 0;
+  /* Press-and-hold on RECORD would otherwise trigger the browser's own
+     long-press gesture — text selection on Android, the callout menu on iOS —
+     instead of being handled as a plain hold by our own pointer events. */
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+#record-btn {
+  /* Fully custom press-and-hold via pointer events — leave no native touch
+     gesture (including long-press) for the browser to race against. */
+  touch-action: none;
 }
 
 #record-btn.recording {

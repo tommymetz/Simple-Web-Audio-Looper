@@ -40,6 +40,8 @@ let masterGain = null;
 
 /** @type {Float32Array[]} raw chunks captured during the current recording */
 let recordedChunks = [];
+/** set by stopRecording(), read once the worklet acknowledges it has stopped */
+let pendingStopApplyEndAutoCrop = true;
 /** @type {Float32Array | null} full normalized recording, fixed per take — crop is always measured from these true edges */
 let originalBuffer = null;
 /** @type {Float32Array | null} originalBuffer with the committed crop applied — source of truth for future DSP and the main waveform view */
@@ -147,9 +149,11 @@ async function initAudio() {
   masterGain.connect(audioCtx.destination);
 
   workletNode.port.onmessage = (event) => {
-    if (state === 'recording') {
-      recordedChunks.push(event.data);
+    if (event.data === 'stopped') {
+      handleWorkletStopped();
+      return;
     }
+    recordedChunks.push(event.data);
   };
 }
 
@@ -384,13 +388,26 @@ async function startRecording() {
     loopSource = null;
   }
   recordedChunks = [];
+  workletNode.port.postMessage('start');
   drawWaveform(null);
   state = 'recording';
   updateUI();
 }
 
-/** applyEndAutoCrop is true for a tap-to-stop, false for a held-then-released stop. */
+/**
+ * Tells the worklet to stop and finalizes once it acknowledges — rather than
+ * finalizing immediately, which could race a backlog of already-recorded
+ * chunks still sitting in the message queue and silently drop them.
+ * applyEndAutoCrop is true for a tap-to-stop, false for a held-then-released stop.
+ */
 function stopRecording(applyEndAutoCrop) {
+  pendingStopApplyEndAutoCrop = applyEndAutoCrop;
+  workletNode.port.postMessage('stop');
+}
+
+function handleWorkletStopped() {
+  const applyEndAutoCrop = pendingStopApplyEndAutoCrop;
+
   originalBuffer = concatChunks(recordedChunks);
   recordedChunks = [];
   normalize(originalBuffer);
