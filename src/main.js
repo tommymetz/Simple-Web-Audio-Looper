@@ -56,6 +56,16 @@ let draftCropSec = 0;
 let dragging = false;
 let dragRAF = null;
 
+/** @type {number | null} */
+let recordHoldTimer = null;
+/** whether the press currently on RECORD is the one that started this recording (vs. a later press to stop it) */
+let recordPressStartedRecording = false;
+/** whether the current press has been held past RECORD_HOLD_MS — if so, release stops the recording */
+let recordHoldThresholdPassed = false;
+// How long a press has to be held before release stops the recording; a quicker
+// release leaves it recording, waiting for a separate tap to stop it.
+const RECORD_HOLD_MS = 350;
+
 function showError(message) {
   errorEl.textContent = message;
   errorEl.hidden = false;
@@ -204,6 +214,17 @@ function drawWaveform(samples) {
   waveformCtx.stroke();
 }
 
+/** Draws the full-loop waveform, tinting both edge zones to hint they're draggable into crop mode. */
+function drawNormalView() {
+  drawWaveform(masterBuffer);
+  if (!masterBuffer || !masterBuffer.length) return;
+  const cssWidth = waveformCanvas.clientWidth;
+  const cssHeight = waveformCanvas.clientHeight;
+  waveformCtx.fillStyle = 'rgba(74, 158, 255, 0.15)';
+  waveformCtx.fillRect(0, 0, EDGE_ZONE_PX, cssHeight);
+  waveformCtx.fillRect(cssWidth - EDGE_ZONE_PX, 0, EDGE_ZONE_PX, cssHeight);
+}
+
 function buildFullBuffer() {
   fullBuffer = audioCtx.createBuffer(1, originalBuffer.length, audioCtx.sampleRate);
   fullBuffer.copyToChannel(originalBuffer, 0);
@@ -230,7 +251,7 @@ function applyCrop() {
   const startSample = Math.round(cropStartSec * sampleRate);
   const endSample = originalBuffer.length - Math.round(cropEndSec * sampleRate);
   masterBuffer = originalBuffer.slice(startSample, endSample);
-  drawWaveform(masterBuffer);
+  drawNormalView();
   updateLoopPoints();
 }
 
@@ -378,7 +399,7 @@ window.addEventListener('resize', () => {
   if (cropMode) {
     drawCropZoom();
   } else {
-    drawWaveform(masterBuffer);
+    drawNormalView();
   }
 });
 
@@ -402,7 +423,50 @@ enableBtn.addEventListener('click', async () => {
   }
 });
 
-recordBtn.addEventListener('click', async () => {
+recordBtn.addEventListener('pointerdown', async (event) => {
+  recordBtn.setPointerCapture(event.pointerId);
+  recordHoldThresholdPassed = false;
+
+  if (state === 'recording') {
+    // A later press, meant to stop the recording already in progress — decided on release.
+    recordPressStartedRecording = false;
+    return;
+  }
+
+  // Start immediately, whether this turns out to be a tap or a hold — no delay,
+  // so the beginning of the loop is never lost waiting to see which it is.
+  recordPressStartedRecording = true;
+  await startRecording();
+  recordHoldTimer = setTimeout(() => {
+    recordHoldThresholdPassed = true;
+  }, RECORD_HOLD_MS);
+});
+
+recordBtn.addEventListener('pointerup', () => {
+  clearTimeout(recordHoldTimer);
+  if (!recordPressStartedRecording) {
+    // A tap while already recording always stops it, tap or hold.
+    stopRecording();
+  } else if (recordHoldThresholdPassed) {
+    // Held past the threshold — release stops it.
+    stopRecording();
+  }
+  // Otherwise: released quickly — keep recording, waiting for a separate tap to stop it.
+});
+
+recordBtn.addEventListener('pointercancel', () => {
+  clearTimeout(recordHoldTimer);
+  if (state === 'recording') {
+    stopRecording();
+  }
+  recordPressStartedRecording = false;
+});
+
+// Keyboard activation (Tab + Enter/Space) doesn't reliably fire pointer events,
+// so it falls through to here as a plain toggle. Pointer clicks have detail >= 1
+// and are already fully handled above, via pointerdown/pointerup.
+recordBtn.addEventListener('click', async (event) => {
+  if (event.detail !== 0) return;
   await audioCtx.resume();
   if (state === 'recording') {
     stopRecording();
@@ -444,7 +508,7 @@ waveformCanvas.addEventListener('pointermove', (event) => {
     updateDragFromEvent(event);
     return;
   }
-  // Not dragging — just hint that the edges are grabbable.
+  // Not dragging — just show the resize cursor near a grabbable edge.
   if (cropMode || !fullBuffer) return;
   const rect = waveformCanvas.getBoundingClientRect();
   const x = event.clientX - rect.left;
