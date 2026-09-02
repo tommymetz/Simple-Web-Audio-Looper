@@ -7,11 +7,20 @@ const recorderProcessorUrl = new URL('./recorder-processor.js', import.meta.url)
 const enableBtn = document.getElementById('enable-btn');
 const looper = document.getElementById('looper');
 const waveformCanvas = document.getElementById('waveform');
+const cropStartBtn = document.getElementById('crop-start-btn');
+const cropEndBtn = document.getElementById('crop-end-btn');
 const recordBtn = document.getElementById('record-btn');
 const playBtn = document.getElementById('play-btn');
 const statusEl = document.getElementById('status');
 const errorEl = document.getElementById('error');
 const waveformCtx = waveformCanvas.getContext('2d');
+
+// Fine-tune-only crop: never lets you crop more than this off either end.
+const MAX_CROP_SECONDS = 0.2;
+// How much context around that edge the zoomed drag view shows.
+const ZOOM_WINDOW_SECONDS = MAX_CROP_SECONDS * 2;
+// Never let a crop leave less audio than this.
+const MIN_KEPT_SECONDS = 0.05;
 
 /** @type {AudioContext | null} */
 let audioCtx = null;
@@ -26,17 +35,28 @@ let masterGain = null;
 
 /** @type {Float32Array[]} raw chunks captured during the current recording */
 let recordedChunks = [];
-/** @type {Float32Array | null} concatenated, normalized PCM — source of truth for future DSP */
+/** @type {Float32Array | null} full normalized recording, fixed per take — crop is always measured from these true edges */
+let originalBuffer = null;
+/** @type {Float32Array | null} originalBuffer with the committed crop applied — source of truth for future DSP and the main waveform view */
 let masterBuffer = null;
-/** @type {AudioBuffer | null} playable form rebuilt from masterBuffer */
-let audioBuffer = null;
-/** @type {AudioBufferSourceNode | null} recreated on every play (one-shot nodes) */
+/** @type {AudioBuffer | null} the FULL (uncropped) recording, built once per take — playback always uses this with loopStart/loopEnd so cropping never restarts the source */
+let fullBuffer = null;
+/** @type {AudioBufferSourceNode | null} recreated only on Record/Play/Pause — crop dragging just nudges its loopStart/loopEnd live */
 let loopSource = null;
 
 /** @type {'idle' | 'recording' | 'playing' | 'paused'} */
 let state = 'idle';
 let pauseOffset = 0;
 let playStartTime = 0;
+
+let cropStartSec = 0;
+let cropEndSec = 0;
+/** @type {'start' | 'end' | null} which edge is currently being dragged */
+let cropMode = null;
+/** value being dragged; only meaningful while cropMode is set */
+let draftCropSec = 0;
+let dragging = false;
+let dragRAF = null;
 
 function showError(message) {
   errorEl.textContent = message;
@@ -50,8 +70,8 @@ function updateUI() {
       recordBtn.classList.remove('recording');
       recordBtn.disabled = false;
       playBtn.textContent = 'PLAY';
-      playBtn.disabled = !audioBuffer;
-      statusEl.textContent = audioBuffer ? 'Ready.' : 'Ready to record.';
+      playBtn.disabled = !fullBuffer;
+      statusEl.textContent = fullBuffer ? 'Ready.' : 'Ready to record.';
       break;
     case 'recording':
       recordBtn.textContent = 'STOP';
@@ -77,6 +97,23 @@ function updateUI() {
       statusEl.textContent = 'Paused.';
       break;
   }
+
+  if (cropMode) {
+    recordBtn.disabled = true;
+    playBtn.disabled = true;
+    statusEl.textContent =
+      cropMode === 'start'
+        ? 'Drag to fine-tune the start point, then Save.'
+        : 'Drag to fine-tune the end point, then Save.';
+  }
+
+  cropStartBtn.textContent = cropMode === 'start' ? 'Save' : 'Crop Start';
+  cropEndBtn.textContent = cropMode === 'end' ? 'Save' : 'Crop End';
+  cropStartBtn.classList.toggle('active', cropMode === 'start');
+  cropEndBtn.classList.toggle('active', cropMode === 'end');
+  cropStartBtn.disabled = !fullBuffer || cropMode === 'end' || state === 'recording';
+  cropEndBtn.disabled = !fullBuffer || cropMode === 'start' || state === 'recording';
+  waveformCanvas.classList.toggle('cropping', !!cropMode);
 }
 
 async function initAudio() {
@@ -169,26 +206,146 @@ function drawWaveform(samples) {
   waveformCtx.stroke();
 }
 
-function buildAudioBuffer() {
-  audioBuffer = audioCtx.createBuffer(1, masterBuffer.length, audioCtx.sampleRate);
-  audioBuffer.copyToChannel(masterBuffer, 0);
+function buildFullBuffer() {
+  fullBuffer = audioCtx.createBuffer(1, originalBuffer.length, audioCtx.sampleRate);
+  fullBuffer.copyToChannel(originalBuffer, 0);
 }
 
-function startPlayback(offset) {
+/** The loop region currently in effect: draft value for whichever edge is being dragged, committed value otherwise. */
+function currentLoopBounds() {
+  const startSec = cropMode === 'start' ? draftCropSec : cropStartSec;
+  const endSec = cropMode === 'end' ? draftCropSec : cropEndSec;
+  return { loopStart: startSec, loopEnd: fullBuffer.duration - endSec };
+}
+
+/** Nudges the already-playing source's loop points — no restart, so the loop keeps playing through the change. */
+function updateLoopPoints() {
+  if (!loopSource) return;
+  const { loopStart, loopEnd } = currentLoopBounds();
+  loopSource.loopStart = loopStart;
+  loopSource.loopEnd = loopEnd;
+}
+
+/** Re-slices originalBuffer by the committed crop points for the main waveform view and future DSP. */
+function applyCrop() {
+  const sampleRate = audioCtx.sampleRate;
+  const startSample = Math.round(cropStartSec * sampleRate);
+  const endSample = originalBuffer.length - Math.round(cropEndSec * sampleRate);
+  masterBuffer = originalBuffer.slice(startSample, endSample);
+  drawWaveform(masterBuffer);
+  updateLoopPoints();
+}
+
+/** How far this edge is still allowed to crop, given what the opposite edge already took and a minimum kept length. */
+function maxCropForSide(side) {
+  const originalDuration = originalBuffer.length / audioCtx.sampleRate;
+  const oppositeSec = side === 'start' ? cropEndSec : cropStartSec;
+  const available = Math.max(0, originalDuration - oppositeSec - MIN_KEPT_SECONDS);
+  return Math.min(MAX_CROP_SECONDS, available);
+}
+
+/** Maps a 0-1 position across the zoomed drag view to a crop value in seconds, clamped to what's allowed. */
+function draftFromFraction(side, fraction) {
+  const raw = side === 'start' ? fraction * ZOOM_WINDOW_SECONDS : (1 - fraction) * ZOOM_WINDOW_SECONDS;
+  return Math.min(maxCropForSide(side), Math.max(0, raw));
+}
+
+/** Inverse of draftFromFraction, for drawing the handle at the current draft value. */
+function fractionFromDraft(side, sec) {
+  return side === 'start' ? sec / ZOOM_WINDOW_SECONDS : 1 - sec / ZOOM_WINDOW_SECONDS;
+}
+
+/** Draws the near-edge zoom window with a draggable handle and dims the region that will be cropped away. */
+function drawCropZoom() {
+  const sampleRate = audioCtx.sampleRate;
+  const windowSamples = Math.round(ZOOM_WINDOW_SECONDS * sampleRate);
+  const startSample = cropMode === 'start' ? 0 : Math.max(0, originalBuffer.length - windowSamples);
+  const slice = originalBuffer.subarray(startSample, startSample + windowSamples);
+
+  drawWaveform(slice);
+
+  const cssWidth = waveformCanvas.clientWidth;
+  const cssHeight = waveformCanvas.clientHeight;
+  const handleX = fractionFromDraft(cropMode, draftCropSec) * cssWidth;
+
+  waveformCtx.fillStyle = 'rgba(211, 51, 51, 0.25)';
+  if (cropMode === 'start') {
+    waveformCtx.fillRect(0, 0, handleX, cssHeight);
+  } else {
+    waveformCtx.fillRect(handleX, 0, cssWidth - handleX, cssHeight);
+  }
+
+  waveformCtx.strokeStyle = '#d33';
+  waveformCtx.lineWidth = 2;
+  waveformCtx.beginPath();
+  waveformCtx.moveTo(handleX, 0);
+  waveformCtx.lineTo(handleX, cssHeight);
+  waveformCtx.stroke();
+  waveformCtx.lineWidth = 1;
+}
+
+function enterCropMode(side) {
+  cropMode = side;
+  draftCropSec = side === 'start' ? cropStartSec : cropEndSec;
+  drawCropZoom();
+  if (loopSource) {
+    updateLoopPoints();
+  } else {
+    startPlayback(0);
+  }
+  updateUI();
+}
+
+function exitCropMode() {
+  if (cropMode === 'start') {
+    cropStartSec = draftCropSec;
+  } else {
+    cropEndSec = draftCropSec;
+  }
+  cropMode = null;
+  // loopSource keeps playing uninterrupted — applyCrop() just re-affirms the
+  // now-committed loop points (already in effect from the last drag update).
+  applyCrop();
+  updateUI();
+}
+
+function scheduleDragUpdate() {
+  if (dragRAF) return;
+  dragRAF = requestAnimationFrame(() => {
+    dragRAF = null;
+    drawCropZoom();
+    updateLoopPoints();
+  });
+}
+
+function updateDragFromEvent(event) {
+  const rect = waveformCanvas.getBoundingClientRect();
+  const fraction = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
+  draftCropSec = draftFromFraction(cropMode, fraction);
+  scheduleDragUpdate();
+}
+
+/** offsetWithinLoop is seconds into the (possibly cropped) loop region, not into the raw buffer. */
+function startPlayback(offsetWithinLoop) {
+  const { loopStart, loopEnd } = currentLoopBounds();
   loopSource = audioCtx.createBufferSource();
-  loopSource.buffer = audioBuffer;
+  loopSource.buffer = fullBuffer;
   loopSource.loop = true;
+  loopSource.loopStart = loopStart;
+  loopSource.loopEnd = loopEnd;
   loopSource.connect(masterGain);
-  loopSource.start(0, offset);
+  loopSource.start(0, loopStart + offsetWithinLoop);
   playStartTime = audioCtx.currentTime;
-  pauseOffset = offset;
+  pauseOffset = offsetWithinLoop;
   state = 'playing';
   updateUI();
 }
 
 function pausePlayback() {
+  const { loopStart, loopEnd } = currentLoopBounds();
+  const loopDuration = loopEnd - loopStart;
   const elapsed = audioCtx.currentTime - playStartTime + pauseOffset;
-  pauseOffset = elapsed % audioBuffer.duration;
+  pauseOffset = loopDuration > 0 ? elapsed % loopDuration : 0;
   loopSource.stop();
   loopSource = null;
   state = 'paused';
@@ -208,15 +365,23 @@ async function startRecording() {
 }
 
 function stopRecording() {
-  masterBuffer = concatChunks(recordedChunks);
+  originalBuffer = concatChunks(recordedChunks);
   recordedChunks = [];
-  normalize(masterBuffer);
-  buildAudioBuffer();
-  drawWaveform(masterBuffer);
+  normalize(originalBuffer);
+  buildFullBuffer();
+  cropStartSec = 0;
+  cropEndSec = 0;
+  applyCrop();
   startPlayback(0);
 }
 
-window.addEventListener('resize', () => drawWaveform(masterBuffer));
+window.addEventListener('resize', () => {
+  if (cropMode) {
+    drawCropZoom();
+  } else {
+    drawWaveform(masterBuffer);
+  }
+});
 
 enableBtn.addEventListener('click', async () => {
   enableBtn.disabled = true;
@@ -254,4 +419,44 @@ playBtn.addEventListener('click', async () => {
   } else if (state === 'paused') {
     startPlayback(pauseOffset);
   }
+});
+
+cropStartBtn.addEventListener('click', async () => {
+  await audioCtx.resume();
+  if (cropMode === 'start') {
+    exitCropMode();
+  } else if (!cropMode) {
+    enterCropMode('start');
+  }
+});
+
+cropEndBtn.addEventListener('click', async () => {
+  await audioCtx.resume();
+  if (cropMode === 'end') {
+    exitCropMode();
+  } else if (!cropMode) {
+    enterCropMode('end');
+  }
+});
+
+waveformCanvas.addEventListener('pointerdown', (event) => {
+  if (!cropMode) return;
+  dragging = true;
+  waveformCanvas.setPointerCapture(event.pointerId);
+  updateDragFromEvent(event);
+});
+
+waveformCanvas.addEventListener('pointermove', (event) => {
+  if (!cropMode || !dragging) return;
+  updateDragFromEvent(event);
+});
+
+waveformCanvas.addEventListener('pointerup', (event) => {
+  if (!cropMode) return;
+  dragging = false;
+  waveformCanvas.releasePointerCapture(event.pointerId);
+});
+
+waveformCanvas.addEventListener('pointercancel', () => {
+  dragging = false;
 });

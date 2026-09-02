@@ -24,6 +24,9 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1rem;
+  /* Fixed so the canvas's own pixel-buffer size (set in JS) can never feed back
+     into this container's width and make the whole layout grow. */
+  width: min(90vw, 24rem);
 }
 
 #waveform {
@@ -33,11 +36,38 @@ body {
   border: 1px solid #888;
   border-radius: 0.5rem;
   background: color-mix(in srgb, currentColor 5%, transparent);
+  touch-action: none;
+}
+
+#waveform.cropping {
+  cursor: ew-resize;
+}
+
+#crop-controls {
+  display: flex;
+  gap: 1rem;
+}
+
+#crop-controls button {
+  flex: 1;
+  font-size: 0.9rem;
+  padding: 0.5rem 1rem;
+  min-width: 0;
+}
+
+#crop-controls button.active {
+  background: #2a8a4a;
+  color: white;
+  border-color: #2a8a4a;
 }
 
 #controls {
   display: flex;
   gap: 1rem;
+}
+
+#controls button {
+  flex: 1;
 }
 
 button {
@@ -46,7 +76,7 @@ button {
   border-radius: 0.5rem;
   border: 1px solid #888;
   cursor: pointer;
-  min-width: 8rem;
+  min-width: 0;
 }
 
 button:disabled {
