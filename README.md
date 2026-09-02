@@ -2,6 +2,8 @@
 
 A self-contained, backend-free audio looper for the browser. Record from your mic, and it loops back instantly, normalized to full volume.
 
+See it in action at [simple-web-audio-looper.netlify.app](https://simple-web-audio-looper.netlify.app/)
+
 ## Features
 
 - **Record / Play / Pause** — tap RECORD to start and stop, or press and hold to record only while held.
