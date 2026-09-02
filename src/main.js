@@ -21,6 +21,11 @@ const ZOOM_WINDOW_SECONDS = 0.4;
 const MIN_KEPT_SECONDS = 0.05;
 // Grabbing within this many CSS pixels of either edge starts a crop drag.
 const EDGE_ZONE_PX = 28;
+// Auto-applied after every recording to trim the button-press transient at the
+// start. Also applied to the end, but only when recording was stopped with a
+// tap (not a press-and-hold-then-release), since a hold's release is already
+// timed to the performance rather than a separate button tap.
+const AUTO_CROP_SECONDS = 0.05;
 
 /** @type {AudioContext | null} */
 let audioCtx = null;
@@ -384,13 +389,20 @@ async function startRecording() {
   updateUI();
 }
 
-function stopRecording() {
+/** applyEndAutoCrop is true for a tap-to-stop, false for a held-then-released stop. */
+function stopRecording(applyEndAutoCrop) {
   originalBuffer = concatChunks(recordedChunks);
   recordedChunks = [];
   normalize(originalBuffer);
   buildFullBuffer();
+
   cropStartSec = 0;
   cropEndSec = 0;
+  cropStartSec = Math.min(AUTO_CROP_SECONDS, maxCropForSide('start'));
+  if (applyEndAutoCrop) {
+    cropEndSec = Math.min(AUTO_CROP_SECONDS, maxCropForSide('end'));
+  }
+
   applyCrop();
   startPlayback();
 }
@@ -423,8 +435,9 @@ enableBtn.addEventListener('click', async () => {
   }
 });
 
-recordBtn.addEventListener('pointerdown', async (event) => {
-  recordBtn.setPointerCapture(event.pointerId);
+/** Shared by the RECORD button (pointerdown) and the spacebar (keydown) — same tap-vs-hold logic either way. */
+async function handleRecordPress() {
+  if (recordBtn.disabled) return;
   recordHoldThresholdPassed = false;
 
   if (state === 'recording') {
@@ -440,48 +453,83 @@ recordBtn.addEventListener('pointerdown', async (event) => {
   recordHoldTimer = setTimeout(() => {
     recordHoldThresholdPassed = true;
   }, RECORD_HOLD_MS);
+}
+
+/** Shared by the RECORD button (pointerup) and the spacebar (keyup). */
+function handleRecordRelease() {
+  clearTimeout(recordHoldTimer);
+  if (!recordPressStartedRecording) {
+    // A tap while already recording always stops it, tap or hold — click mode.
+    stopRecording(true);
+  } else if (recordHoldThresholdPassed) {
+    // Held past the threshold — release stops it, hold mode.
+    stopRecording(false);
+  }
+  // Otherwise: released quickly — keep recording, waiting for a separate tap to stop it.
+}
+
+recordBtn.addEventListener('pointerdown', (event) => {
+  recordBtn.setPointerCapture(event.pointerId);
+  handleRecordPress();
 });
 
 recordBtn.addEventListener('pointerup', () => {
-  clearTimeout(recordHoldTimer);
-  if (!recordPressStartedRecording) {
-    // A tap while already recording always stops it, tap or hold.
-    stopRecording();
-  } else if (recordHoldThresholdPassed) {
-    // Held past the threshold — release stops it.
-    stopRecording();
-  }
-  // Otherwise: released quickly — keep recording, waiting for a separate tap to stop it.
+  handleRecordRelease();
 });
 
 recordBtn.addEventListener('pointercancel', () => {
   clearTimeout(recordHoldTimer);
   if (state === 'recording') {
-    stopRecording();
+    stopRecording(false);
   }
   recordPressStartedRecording = false;
 });
 
-// Keyboard activation (Tab + Enter/Space) doesn't reliably fire pointer events,
-// so it falls through to here as a plain toggle. Pointer clicks have detail >= 1
-// and are already fully handled above, via pointerdown/pointerup.
+// Keyboard activation (Tab + Enter) doesn't reliably fire pointer events, so it
+// falls through to here as a plain toggle. Pointer clicks have detail >= 1 and
+// are already fully handled above; Space is handled separately below, with
+// preventDefault() on keydown suppressing this synthetic click for it.
 recordBtn.addEventListener('click', async (event) => {
   if (event.detail !== 0) return;
   await audioCtx.resume();
   if (state === 'recording') {
-    stopRecording();
+    stopRecording(true);
   } else {
     await startRecording();
   }
 });
 
-playBtn.addEventListener('click', async () => {
+// Spacebar mirrors the RECORD button's own press/release (tap vs. hold), as a global shortcut.
+window.addEventListener('keydown', (event) => {
+  if (event.code !== 'Space' || event.repeat) return;
+  event.preventDefault();
+  handleRecordPress();
+});
+
+window.addEventListener('keyup', (event) => {
+  if (event.code !== 'Space') return;
+  event.preventDefault();
+  handleRecordRelease();
+});
+
+/** Shared by the PLAY/PAUSE button (click) and Enter (keydown). */
+async function togglePlayPause() {
+  if (playBtn.disabled) return;
   await audioCtx.resume();
   if (state === 'playing') {
     pausePlayback();
   } else if (state === 'paused') {
     startPlayback();
   }
+}
+
+playBtn.addEventListener('click', togglePlayPause);
+
+// Enter mirrors the PLAY/PAUSE button, as a global shortcut.
+window.addEventListener('keydown', (event) => {
+  if (event.code !== 'Enter' || event.repeat) return;
+  event.preventDefault();
+  togglePlayPause();
 });
 
 waveformCanvas.addEventListener('pointerdown', (event) => {
