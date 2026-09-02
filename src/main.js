@@ -46,8 +46,6 @@ let loopSource = null;
 
 /** @type {'idle' | 'recording' | 'playing' | 'paused'} */
 let state = 'idle';
-let pauseOffset = 0;
-let playStartTime = 0;
 
 let cropStartSec = 0;
 let cropEndSec = 0;
@@ -166,6 +164,14 @@ function normalize(samples) {
   }
 }
 
+// Log-like visual compression for the waveform: pulls quiet parts up towards
+// full height without touching peaks (1 stays 1). Lower = more compression.
+const WAVEFORM_GAMMA = 0.5;
+
+function compressAmplitude(v) {
+  return Math.sign(v) * Math.abs(v) ** WAVEFORM_GAMMA;
+}
+
 /** Draws a min/max envelope of the whole buffer, scaled to fill the canvas box. */
 function drawWaveform(samples) {
   const dpr = window.devicePixelRatio || 1;
@@ -192,8 +198,8 @@ function drawWaveform(samples) {
       if (v < min) min = v;
       if (v > max) max = v;
     }
-    waveformCtx.moveTo(x + 0.5, mid - max * mid);
-    waveformCtx.lineTo(x + 0.5, mid - min * mid);
+    waveformCtx.moveTo(x + 0.5, mid - compressAmplitude(max) * mid);
+    waveformCtx.lineTo(x + 0.5, mid - compressAmplitude(min) * mid);
   }
   waveformCtx.stroke();
 }
@@ -283,7 +289,7 @@ function enterCropMode(side) {
   if (loopSource) {
     updateLoopPoints();
   } else {
-    startPlayback(0);
+    startPlayback();
   }
   updateUI();
 }
@@ -324,8 +330,8 @@ function updateDragFromEvent(event) {
   scheduleDragUpdate();
 }
 
-/** offsetWithinLoop is seconds into the (possibly cropped) loop region, not into the raw buffer. */
-function startPlayback(offsetWithinLoop) {
+/** Always starts from the top of the (possibly cropped) loop region. */
+function startPlayback() {
   const { loopStart, loopEnd } = currentLoopBounds();
   loopSource = audioCtx.createBufferSource();
   loopSource.buffer = fullBuffer;
@@ -333,18 +339,12 @@ function startPlayback(offsetWithinLoop) {
   loopSource.loopStart = loopStart;
   loopSource.loopEnd = loopEnd;
   loopSource.connect(masterGain);
-  loopSource.start(0, loopStart + offsetWithinLoop);
-  playStartTime = audioCtx.currentTime;
-  pauseOffset = offsetWithinLoop;
+  loopSource.start(0, loopStart);
   state = 'playing';
   updateUI();
 }
 
 function pausePlayback() {
-  const { loopStart, loopEnd } = currentLoopBounds();
-  const loopDuration = loopEnd - loopStart;
-  const elapsed = audioCtx.currentTime - playStartTime + pauseOffset;
-  pauseOffset = loopDuration > 0 ? elapsed % loopDuration : 0;
   loopSource.stop();
   loopSource = null;
   state = 'paused';
@@ -371,7 +371,7 @@ function stopRecording() {
   cropStartSec = 0;
   cropEndSec = 0;
   applyCrop();
-  startPlayback(0);
+  startPlayback();
 }
 
 window.addEventListener('resize', () => {
@@ -416,7 +416,7 @@ playBtn.addEventListener('click', async () => {
   if (state === 'playing') {
     pausePlayback();
   } else if (state === 'paused') {
-    startPlayback(pauseOffset);
+    startPlayback();
   }
 });
 
