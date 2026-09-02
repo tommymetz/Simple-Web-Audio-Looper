@@ -39,26 +39,9 @@ body {
   touch-action: none;
 }
 
-#waveform.cropping {
+#waveform.cropping,
+#waveform.edge-hover {
   cursor: ew-resize;
-}
-
-#crop-controls {
-  display: flex;
-  gap: 1rem;
-}
-
-#crop-controls button {
-  flex: 1;
-  font-size: 0.9rem;
-  padding: 0.5rem 1rem;
-  min-width: 0;
-}
-
-#crop-controls button.active {
-  background: #2a8a4a;
-  color: white;
-  border-color: #2a8a4a;
 }
 
 #controls {

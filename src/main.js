@@ -7,20 +7,20 @@ const recorderProcessorUrl = new URL('./recorder-processor.js', import.meta.url)
 const enableBtn = document.getElementById('enable-btn');
 const looper = document.getElementById('looper');
 const waveformCanvas = document.getElementById('waveform');
-const cropStartBtn = document.getElementById('crop-start-btn');
-const cropEndBtn = document.getElementById('crop-end-btn');
 const recordBtn = document.getElementById('record-btn');
 const playBtn = document.getElementById('play-btn');
 const statusEl = document.getElementById('status');
 const errorEl = document.getElementById('error');
 const waveformCtx = waveformCanvas.getContext('2d');
 
-// Fine-tune-only crop: never lets you crop more than this off either end.
-const MAX_CROP_SECONDS = 0.2;
-// How much context around that edge the zoomed drag view shows.
-const ZOOM_WINDOW_SECONDS = MAX_CROP_SECONDS * 2;
+// Fine-tune-only crop: how much of the recording's edge the zoomed drag view
+// shows, and the full range the handle can travel — the drag can reach either
+// end of this box.
+const ZOOM_WINDOW_SECONDS = 0.4;
 // Never let a crop leave less audio than this.
 const MIN_KEPT_SECONDS = 0.05;
+// Grabbing within this many CSS pixels of either edge starts a crop drag.
+const EDGE_ZONE_PX = 28;
 
 /** @type {AudioContext | null} */
 let audioCtx = null;
@@ -102,17 +102,9 @@ function updateUI() {
     recordBtn.disabled = true;
     playBtn.disabled = true;
     statusEl.textContent =
-      cropMode === 'start'
-        ? 'Drag to fine-tune the start point, then Save.'
-        : 'Drag to fine-tune the end point, then Save.';
+      cropMode === 'start' ? 'Dragging start point — release to set it.' : 'Dragging end point — release to set it.';
   }
 
-  cropStartBtn.textContent = cropMode === 'start' ? 'Save' : 'Crop Start';
-  cropEndBtn.textContent = cropMode === 'end' ? 'Save' : 'Crop End';
-  cropStartBtn.classList.toggle('active', cropMode === 'start');
-  cropEndBtn.classList.toggle('active', cropMode === 'end');
-  cropStartBtn.disabled = !fullBuffer || cropMode === 'end' || state === 'recording';
-  cropEndBtn.disabled = !fullBuffer || cropMode === 'start' || state === 'recording';
   waveformCanvas.classList.toggle('cropping', !!cropMode);
 }
 
@@ -241,7 +233,7 @@ function maxCropForSide(side) {
   const originalDuration = originalBuffer.length / audioCtx.sampleRate;
   const oppositeSec = side === 'start' ? cropEndSec : cropStartSec;
   const available = Math.max(0, originalDuration - oppositeSec - MIN_KEPT_SECONDS);
-  return Math.min(MAX_CROP_SECONDS, available);
+  return Math.min(ZOOM_WINDOW_SECONDS, available);
 }
 
 /** Maps a 0-1 position across the zoomed drag view to a crop value in seconds, clamped to what's allowed. */
@@ -305,6 +297,13 @@ function exitCropMode() {
   cropMode = null;
   // loopSource keeps playing uninterrupted — applyCrop() just re-affirms the
   // now-committed loop points (already in effect from the last drag update).
+  applyCrop();
+  updateUI();
+}
+
+/** Abandons the in-progress drag (e.g. pointercancel) without committing the draft value. */
+function cancelCropMode() {
+  cropMode = null;
   applyCrop();
   updateUI();
 }
@@ -421,42 +420,50 @@ playBtn.addEventListener('click', async () => {
   }
 });
 
-cropStartBtn.addEventListener('click', async () => {
-  await audioCtx.resume();
-  if (cropMode === 'start') {
-    exitCropMode();
-  } else if (!cropMode) {
-    enterCropMode('start');
-  }
-});
-
-cropEndBtn.addEventListener('click', async () => {
-  await audioCtx.resume();
-  if (cropMode === 'end') {
-    exitCropMode();
-  } else if (!cropMode) {
-    enterCropMode('end');
-  }
-});
-
 waveformCanvas.addEventListener('pointerdown', (event) => {
-  if (!cropMode) return;
+  if (!fullBuffer || state === 'recording') return;
+
+  if (!cropMode) {
+    const rect = waveformCanvas.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    if (x <= EDGE_ZONE_PX) {
+      enterCropMode('start');
+    } else if (x >= rect.width - EDGE_ZONE_PX) {
+      enterCropMode('end');
+    } else {
+      return; // not near an edge — nothing to grab
+    }
+  }
+
   dragging = true;
   waveformCanvas.setPointerCapture(event.pointerId);
-  updateDragFromEvent(event);
 });
 
 waveformCanvas.addEventListener('pointermove', (event) => {
-  if (!cropMode || !dragging) return;
-  updateDragFromEvent(event);
+  if (cropMode && dragging) {
+    updateDragFromEvent(event);
+    return;
+  }
+  // Not dragging — just hint that the edges are grabbable.
+  if (cropMode || !fullBuffer) return;
+  const rect = waveformCanvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const nearEdge = x <= EDGE_ZONE_PX || x >= rect.width - EDGE_ZONE_PX;
+  waveformCanvas.classList.toggle('edge-hover', nearEdge);
+});
+
+waveformCanvas.addEventListener('pointerleave', () => {
+  if (!cropMode) waveformCanvas.classList.remove('edge-hover');
 });
 
 waveformCanvas.addEventListener('pointerup', (event) => {
   if (!cropMode) return;
   dragging = false;
   waveformCanvas.releasePointerCapture(event.pointerId);
+  exitCropMode();
 });
 
 waveformCanvas.addEventListener('pointercancel', () => {
   dragging = false;
+  if (cropMode) cancelCropMode();
 });
