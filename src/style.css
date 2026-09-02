@@ -73,9 +73,29 @@ button:disabled {
   border-color: #d33;
 }
 
+#status,
+#help {
+  /* Matches #looper's fixed width so this text wraps in place instead of
+     stretching #app (and the whole page) to fit an unwrapped line. */
+  max-width: min(90vw, 24rem);
+}
+
 #status {
   font-size: 1rem;
   opacity: 0.8;
+}
+
+#help {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  opacity: 0.55;
+}
+
+#help p {
+  margin: 0;
 }
 
 #error {
