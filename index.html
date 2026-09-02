@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Audio Looper</title>
+  </head>
+  <body>
+    <div id="app">
+      <button id="enable-btn" type="button">Enable Microphone</button>
+
+      <div id="looper" hidden>
+        <canvas id="waveform" height="100"></canvas>
+        <div id="controls">
+          <button id="record-btn" type="button" disabled>RECORD</button>
+          <button id="play-btn" type="button" disabled>PLAY</button>
+        </div>
+      </div>
+
+      <p id="status">Click "Enable Microphone" to begin.</p>
+      <p id="error" hidden></p>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
