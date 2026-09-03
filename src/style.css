@@ -3,12 +3,24 @@
   font-family: system-ui, sans-serif;
 }
 
+/* Without these, dragging the crop handles on iOS Safari can rubber-band or
+   pan the whole page sideways instead of just driving the canvas's own
+   pointer events, making the crop drag feel broken. touch-action: pan-y
+   still allows the page to scroll vertically if its content ever grows
+   taller than the viewport. */
+html {
+  height: 100%;
+  overscroll-behavior: none;
+}
+
 body {
   display: flex;
-  min-height: 100vh;
+  min-height: 100%;
   align-items: center;
   justify-content: center;
   margin: 0;
+  overscroll-behavior: none;
+  touch-action: pan-y;
 }
 
 #app {
